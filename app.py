@@ -1,26 +1,31 @@
 import streamlit as st
 import io
+import os
 from datetime import datetime
 from docxtpl import DocxTemplate
+from openai import OpenAI
 
 # --- CONFIGURACIÓN DE PÁGINA ---
-# Eliminamos el ícono del emoji y dejamos el título limpio
 st.set_page_config(page_title="Zonda Legal | Sistema de Gestión", layout="centered")
 
-# --- INYECCIÓN DE CSS (DISEÑO PREMIUM Y CORPORATIVO) ---
+# --- CONEXIÓN SEGURA CON OPENAI ---
+# Intentamos leer la clave desde los secretos de Streamlit Cloud, si falla, busca en el entorno local
+try:
+    api_key = st.secrets["OPENAI_API_KEY"]
+except:
+    api_key = os.getenv("OPENAI_API_KEY")
+
+cliente_openai = OpenAI(api_key=api_key)
+
+# --- INYECCIÓN DE CSS (DISEÑO CORPORATIVO) ---
 st.markdown("""
     <style>
-    /* Ocultar marca de agua y menú de Streamlit */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header {visibility: hidden;}
-    
-    /* Forzar tipografía Sans Serif en toda la app por seguridad */
     html, body, [class*="css"] {
         font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif !important;
     }
-    
-    /* Estilizar botones para un look profesional */
     .stButton>button {
         border-radius: 4px;
         font-weight: 500;
@@ -30,8 +35,6 @@ st.markdown("""
         transform: translateY(-1px);
         box-shadow: 0 4px 6px rgba(0,0,0,0.05);
     }
-    
-    /* Suavizar bordes de los campos de texto */
     .stTextInput>div>div>input, .stTextArea>div>div>textarea {
         border-radius: 4px;
     }
@@ -44,7 +47,6 @@ def obtener_fecha_actual():
     hoy = datetime.now()
     return f"{hoy.day} de {meses[hoy.month - 1]} del {hoy.year}"
 
-# --- ESTADO DE SESIÓN ---
 if 'usuario_actual' not in st.session_state:
     st.session_state.usuario_actual = None
 
@@ -86,9 +88,9 @@ elif archivo_word is None:
     
 else:
     st.header("Nueva Propuesta de Registro")
-    st.write("Complete los datos del cliente para procesar el documento comercial.")
+    st.write("Complete los datos básicos. La IA se encargará de redactar las clases correspondientes.")
     
-    # FORMULARIO VISUAL (Sin Emojis)
+    # FORMULARIO VISUAL
     with st.form("formulario_propuesta"):
         
         col1, col2 = st.columns(2)
@@ -97,52 +99,79 @@ else:
         with col2:
             input_marca = st.text_input("Marca a Registrar", placeholder="Ej: EDESTE")
             
-        input_clases = st.text_area("Detalle de Clases y Productos", 
-                                    height=150, 
-                                    placeholder="- Clase 37: Instalación de aparatos...\n- Clase 39: Suministro de energía...")
+        # NUEVO CAMPO: Solo pedimos a qué se dedican, no las clases exactas
+        input_negocio = st.text_area("Descripción del Negocio / Producto", 
+                                    height=100, 
+                                    placeholder="Ej: Desarrollamos un software de gestión para estudios jurídicos y damos asesoría.")
         
         st.markdown("---")
         st.subheader("Presupuesto")
         
         col3, col4 = st.columns(2)
         with col3:
-            input_honorarios = st.number_input("Honorarios Profesionales (ARS)", min_value=0, step=1000, value=180000)
+            input_honorarios = st.number_input("Honorarios Profesionales (ARS)", min_value=0, step=1000, value=230000)
         with col4:
             st.number_input("Arancel INPI Fijo (ARS)", value=36000, disabled=True)
             
-        submit_btn = st.form_submit_button("Procesar Documento", type="primary", use_container_width=True)
+        submit_btn = st.form_submit_button("Generar Propuesta Inteligente", type="primary", use_container_width=True)
 
     # --- LÓGICA DE GENERACIÓN ---
     if submit_btn:
-        if input_cliente and input_marca and input_clases:
+        if input_cliente and input_marca and input_negocio:
             
-            arancel_fijo = 36000
-            monto_total = input_honorarios + arancel_fijo
-            
-            honorarios_str = f"$ {input_honorarios:,.0f}".replace(',', '.')
-            arancel_str = f"$ {arancel_fijo:,.0f}".replace(',', '.')
-            total_str = f"$ {monto_total:,.0f}".replace(',', '.')
-            
-            doc = DocxTemplate(archivo_word)
-            contexto = {
-                "FECHA": obtener_fecha_actual(),
-                "CLIENTE": input_cliente,
-                "MARCA": input_marca.upper(),
-                "CLASES": input_clases,
-                "HONORARIOS": honorarios_str,
-                "ARANCEL": arancel_str,
-                "TOTAL": total_str
-            }
-            doc.render(contexto)
-            
-            buffer = io.BytesIO()
-            doc.save(buffer)
-            buffer.seek(0)
-            
-            st.session_state.word_final = buffer
-            st.success("Documento generado exitosamente. Listo para descargar.")
+            with st.spinner("La IA está analizando las clases de Niza correspondientes..."):
+                
+                # 1. LLAMADA A LA IA PARA LAS CLASES
+                instruccion_sistema = """
+                Eres un abogado experto en marcas en Argentina y la Clasificación de Niza.
+                El usuario te describirá un negocio. Tu tarea es sugerir las clases pertinentes para registrar la marca.
+                Devuelve ÚNICAMENTE las clases redactadas en formato de lista con guiones, sin saludos ni introducciones.
+                Ejemplo:
+                - Clase 9: Software de gestión legal; Programas informáticos...
+                - Clase 42: Diseño y desarrollo de software...
+                """
+                
+                respuesta_ia = cliente_openai.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {"role": "system", "content": instruccion_sistema},
+                        {"role": "user", "content": input_negocio}
+                    ]
+                )
+                
+                clases_sugeridas = respuesta_ia.choices[0].message.content
+                
+                # 2. MATEMÁTICA Y FORMATO NUMÉRICO (Sin el símbolo de $)
+                arancel_fijo = 36000
+                monto_total = input_honorarios + arancel_fijo
+                
+                # Formateamos con puntos para los miles, pero SIN agregar el $ en Python
+                honorarios_str = f"{input_honorarios:,.0f}".replace(',', '.')
+                arancel_str = f"{arancel_fijo:,.0f}".replace(',', '.')
+                total_str = f"{monto_total:,.0f}".replace(',', '.')
+                
+                # 3. INYECCIÓN EN EL WORD
+                doc = DocxTemplate(archivo_word)
+                contexto = {
+                    "FECHA": obtener_fecha_actual(),
+                    "CLIENTE": input_cliente,
+                    "MARCA": input_marca.upper(),
+                    "CLASES": clases_sugeridas,
+                    "HONORARIOS": honorarios_str,
+                    "ARANCEL": arancel_str,
+                    "TOTAL": total_str
+                }
+                doc.render(contexto)
+                
+                buffer = io.BytesIO()
+                doc.save(buffer)
+                buffer.seek(0)
+                
+                st.session_state.word_final = buffer
+                st.success("¡Documento y clases generadas exitosamente!")
+                
         else:
-            st.error("Error: Todos los campos del cliente son obligatorios.")
+            st.error("Error: Todos los campos son obligatorios.")
 
     if 'word_final' in st.session_state:
         st.download_button(
