@@ -23,11 +23,14 @@ FOLDER_ID_DRIVE = "0ADXRLdoXNiWQUk9PVA"
 # --- CONFIGURACIÓN DE GOOGLE DRIVE ---
 def obtener_servicio_drive():
     try:
+        # 1. Si existe el archivo físico (Local)
         if os.path.exists("service_account.json"):
             with open("service_account.json") as f:
                 info = json.load(f)
+        # 2. Si no, usamos los secretos (Nube)
         else:
-            info = json.loads(st.secrets["google_auth"])
+            # IMPORTANTE: Eliminamos el json.loads() porque Streamlit ya lo da procesado
+            info = st.secrets["google_auth"]
         
         creds = service_account.Credentials.from_service_account_info(
             info, scopes=['https://www.googleapis.com/auth/drive']
