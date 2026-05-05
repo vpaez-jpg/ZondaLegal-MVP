@@ -165,27 +165,48 @@ elif st.session_state.herramienta_actual == "Propuestas":
         with col2:
             input_marca = st.text_input("Marca")
 
-        audio_bytes = audio_recorder(text="Hablar", icon_size="2x", pause_threshold=5.0)
-        if audio_bytes and audio_bytes != st.session_state.ultimo_audio:
-            if len(audio_bytes) > 10000:
+        # Inicialización de estado conectada directamente a la caja de texto
+        if "texto_propuesta" not in st.session_state:
+            st.session_state.texto_propuesta = ""
+
+        # Agregamos un key="audio_propuesta" para que no se mezcle con el otro micrófono
+        audio_bytes = audio_recorder(text="Hablar", icon_size="2x", pause_threshold=5.0, key="audio_propuesta")
+        
+        if audio_bytes and audio_bytes != st.session_state.get("ultimo_audio_propuesta"):
+            if len(audio_bytes) > 2000:
                 with st.spinner("Escuchando..."):
                     archivo_audio = io.BytesIO(audio_bytes)
                     archivo_audio.name = "audio.wav"
                     transcripcion = cliente_openai.audio.transcriptions.create(model="whisper-1", file=archivo_audio)
-                    st.session_state.texto_input = transcripcion.text
-                    st.session_state.ultimo_audio = audio_bytes
+                    
+                    # Almacenamos la transcripción directamente en la llave de la caja de texto
+                    st.session_state.texto_propuesta = transcripcion.text
+                    st.session_state.ultimo_audio_propuesta = audio_bytes
                     st.rerun()
 
-        input_negocio_texto = st.text_area("Descripción del negocio", value=st.session_state.texto_input, key="texto_input_propuesta")
+        # Usamos el key="texto_propuesta" para que se actualice solo
+        input_negocio_texto = st.text_area("Descripción del negocio", key="texto_propuesta")
         input_honorarios = st.number_input("Honorarios (ARS)", value=230000)
 
         if st.button("Generar Propuesta", type="primary"):
-            if input_cliente and input_marca and st.session_state.texto_input:
+            if input_cliente and input_marca and st.session_state.texto_propuesta:
                 with st.spinner("Creando documento..."):
+                    
+                    # PROMPT ESTRICTO PARA EVITAR ASTERISCOS Y SALUDOS
+                    instruccion_propuesta = """
+                    Eres un abogado experto en marcas en Argentina. El usuario describirá un negocio y debes sugerir las clases de Niza pertinentes.
+                    REGLAS ESTRICTAS DE FORMATO:
+                    1. NO escribas ningún párrafo introductorio (Ej: Prohibido escribir "Para una marca de ropa..."). Empieza tu respuesta directamente con la lista.
+                    2. PROHIBIDO usar formato Markdown. NO uses asteriscos (**) en ningún lado. Escribe en texto plano.
+                    3. Usa guiones simples (-) para las viñetas.
+                    4. Detalla el número de clase y el contenido específico que le sirve a esa marca.
+                    5. Al final de la lista, agrega un único párrafo muy breve avisando que si planea expandir o diversificar el negocio, debería considerar otras clases.
+                    """
+                    
                     res = cliente_openai.chat.completions.create(
                         model="gpt-4o",
-                        messages=[{"role": "system", "content": "Eres abogado de marcas. Sugiere clases de Niza en lista con guiones."},
-                                  {"role": "user", "content": st.session_state.texto_input}]
+                        messages=[{"role": "system", "content": instruccion_propuesta},
+                                  {"role": "user", "content": st.session_state.texto_propuesta}]
                     )
                     clases = res.choices[0].message.content
                     
@@ -215,31 +236,37 @@ elif st.session_state.herramienta_actual == "Cartas Poder":
     st.header("Generador Automático de Cartas Poder")
     st.write("Dicta los datos del cliente. La IA detectará automáticamente si es persona física o sociedad.")
     
-    # 1. ARREGLO DEL MICRÓFONO (Límite bajado a 2000 bytes)
-    audio_bytes = audio_recorder(text="Hablar", icon_size="2x", pause_threshold=5.0)
-    if audio_bytes and audio_bytes != st.session_state.ultimo_audio:
+    # Inicialización de estado para la carta poder
+    if "texto_poder" not in st.session_state:
+        st.session_state.texto_poder = ""
+
+    # Micrófono independiente
+    audio_bytes = audio_recorder(text="Hablar", icon_size="2x", pause_threshold=5.0, key="audio_poder")
+    
+    if audio_bytes and audio_bytes != st.session_state.get("ultimo_audio_poder"):
         if len(audio_bytes) > 2000: 
             with st.spinner("Escuchando los datos..."):
                 try:
                     archivo_audio = io.BytesIO(audio_bytes)
                     archivo_audio.name = "audio.wav"
                     transcripcion = cliente_openai.audio.transcriptions.create(model="whisper-1", file=archivo_audio)
-                    st.session_state.texto_input = transcripcion.text
-                    st.session_state.ultimo_audio = audio_bytes
+                    
+                    # Conectamos transcripción directo a la caja de texto
+                    st.session_state.texto_poder = transcripcion.text
+                    st.session_state.ultimo_audio_poder = audio_bytes
                     st.rerun()
                 except Exception as e:
                     st.error(f"Error procesando el audio: {e}")
         else:
             st.warning("El audio fue muy corto o no se detectó sonido. Intenta de nuevo.")
-            st.session_state.ultimo_audio = audio_bytes
+            st.session_state.ultimo_audio_poder = audio_bytes
 
-    datos_cliente = st.text_area("Datos detectados o escríbalos aquí:", value=st.session_state.texto_input, key="texto_input_poder", height=150)
+    # Usamos key="texto_poder" para que el texto aparezca instantáneamente
+    datos_cliente = st.text_area("Datos detectados o escríbalos aquí:", key="texto_poder", height=150)
 
     if st.button("Generar Carta Poder (PDF)", type="primary"):
-        if datos_cliente:
+        if st.session_state.texto_poder:
             with st.spinner("Analizando tipo de persona y redactando..."):
-                
-                # 2. INSTRUCCIÓN "ENTRENADA" PARA LA IA
                 instruccion = """
                 Eres un asistente legal experto en Argentina. Tu tarea es analizar los datos provistos y redactar SOLO la parte inicial de una carta poder.
                 DEBES APLICAR ESTAS REGLAS ESTRICTAS PARA DETECTAR EL TIPO DE PERSONA:
@@ -252,7 +279,7 @@ elif st.session_state.herramienta_actual == "Cartas Poder":
                 
                 Devuelve la respuesta en formato JSON con esta estructura exacta:
                 {
-                  "encabezado": "El texto de presentación redactado según las reglas de arriba. Termina el texto justo antes de la palabra 'otorga/otorgan'. NO agregues el nombre de los apoderados (Valentín, Franco, etc.).",
+                  "encabezado": "El texto de presentación redactado. Termina el texto justo antes de la palabra 'otorga/otorgan'. NO agregues el nombre de los apoderados (Valentín, Franco, etc.).",
                   "verbo": "otorga" (si es una sola persona física o una sola sociedad) u "otorgan" (si son varias personas físicas),
                   "firmantes": [ {"nombre": "NOMBRE DEL FIRMANTE HUMANO", "dni": "NUMERO DE DNI/CUIT"} ]
                 }
@@ -263,7 +290,7 @@ elif st.session_state.herramienta_actual == "Cartas Poder":
                     response_format={ "type": "json_object" },
                     messages=[
                         {"role": "system", "content": instruccion},
-                        {"role": "user", "content": datos_cliente}
+                        {"role": "user", "content": st.session_state.texto_poder}
                     ]
                 )
                 
@@ -272,11 +299,9 @@ elif st.session_state.herramienta_actual == "Cartas Poder":
                 verbo = datos_procesados.get("verbo", "otorga")
                 firmantes = datos_procesados.get("firmantes", [])
 
-                # --- TEXTOS ESTÁTICOS ---
                 texto_apoderados = f" por la presente {verbo} a favor del Sr. Valentín Nehuen Páez, DNI N° 42.749.912, con domicilio en calle Las Malvinas 2621, San Rafael, Mendoza, al Sr. Franco Sileoni D´Angelo, DNI N° 42.266.242, con domicilio en calle Barrio puesta del sol, casa 5, Chacras de coria, Mendoza y al Sr. Hugo Matías Bindelli, DNI N° 43.369.631 con domicilio en calle Julio A. Roca 316, Ciudad de Mendoza, Provincia de Mendoza poder amplio para "
                 texto_cuerpo = "que en su nombre y representación inicie, entienda e intervenga hasta su total terminación en los procesos administrativos frente al Instituto Nacional de la Propiedad Industrial y la Dirección Nacional de Derechos de Autor, necesarios para la obtención de patentes de invención, modelos de utilidad, marcas, modelos y diseños industriales, derechos de autor y conexos; la renovación de todos ellos, pudiendo presentarse ante las autoridades que corresponda, ya sean nacionales, provinciales o municipales, con intervenciones, solicitudes, declaraciones, descripciones, apelaciones y otros recursos; formular, limitar, modificar y retirar oposiciones, reclamos y llamados de atención; justificar explotaciones y usos; efectuar modificaciones; solicitar testimonios; pedir plazos; retirar, inspeccionar, presentar y recibir documentos; desistir y hacer cuanto fuere menester ante las autoridades administrativas de cualquier orden. Al efecto, lo faculta para que se presente ante las autoridades o terceros particulares que corresponda, con escritos, documentos y cuantos justificativos creyera necesario, ya sea en soporte papel o mediante la utilización de presentaciones electrónicas, para hacer valer sus derechos de propiedad intelectual y asociados; como así también a constituir domicilio electrónico y recibir las notificaciones que a su nombre allí se diligencien, y toda cuanta otra facultad más le fuera necesaria, para mejor desempeño de este mandato y hasta su completa terminación."
 
-                # --- GENERACIÓN DEL PDF ---
                 pdf = FPDF()
                 pdf.add_page()
                 pdf.set_font("Arial", 'B', 14)
@@ -285,8 +310,6 @@ elif st.session_state.herramienta_actual == "Cartas Poder":
                 
                 pdf.set_font("Arial", '', 11)
                 texto_completo = f"{encabezado_cliente}{texto_apoderados}{texto_cuerpo}"
-                
-                # FPDF requiere que decodifiquemos a latin-1 para evitar errores con tildes
                 pdf.multi_cell(0, 7, texto_completo.encode('latin-1', 'replace').decode('latin-1'))
                 
                 pdf.ln(15)
@@ -300,10 +323,7 @@ elif st.session_state.herramienta_actual == "Cartas Poder":
                     pdf.cell(0, 7, "Firma: ________________________", ln=True)
                     pdf.ln(15)
 
-                # 3. ARREGLO DEL ERROR DE BYTEARRAY
-                # Extraemos los bytes directamente sin usar .encode()
                 pdf_bytes = bytes(pdf.output()) 
-                
                 st.session_state.pdf_final = pdf_bytes
                 st.success("¡Carta Poder PDF generada con éxito!")
 
