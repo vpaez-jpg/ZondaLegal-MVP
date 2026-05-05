@@ -1,182 +1,313 @@
 import streamlit as st
 import io
 import os
+import json
 from datetime import datetime
 from docxtpl import DocxTemplate
 from openai import OpenAI
+from audio_recorder_streamlit import audio_recorder
+from dotenv import load_dotenv
+from fpdf import FPDF
+
+# Librerías para Google Drive
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 
 # --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="Zonda Legal | Sistema de Gestión", layout="centered")
+st.set_page_config(page_title="Zonda Legal | Gestión Cloud", layout="centered")
+load_dotenv()
 
-# --- CONEXIÓN SEGURA CON OPENAI ---
-# Intentamos leer la clave desde los secretos de Streamlit Cloud, si falla, busca en el entorno local
+FOLDER_ID_DRIVE = "0ADXRLdoXNiWQUk9PVA"
+
+# --- CONFIGURACIÓN DE GOOGLE DRIVE ---
+def obtener_servicio_drive():
+    try:
+        if os.path.exists("service_account.json"):
+            with open("service_account.json") as f:
+                info = json.load(f)
+        else:
+            info = json.loads(st.secrets["google_auth"])
+        
+        creds = service_account.Credentials.from_service_account_info(
+            info, scopes=['https://www.googleapis.com/auth/drive']
+        )
+        return build('drive', 'v3', credentials=creds)
+    except Exception as e:
+        st.error(f"Error de configuración con Google Drive: {e}")
+        return None
+
+drive_service = obtener_servicio_drive()
+
+def buscar_plantilla_en_drive(nombre_usuario):
+    query = f"name = '{nombre_usuario}.docx' and '{FOLDER_ID_DRIVE}' in parents and trashed = false"
+    results = drive_service.files().list(
+        q=query, fields="files(id, name)", includeItemsFromAllDrives=True, supportsAllDrives=True
+    ).execute()
+    files = results.get('files', [])
+    return files[0] if files else None
+
+def descargar_plantilla_desde_drive(file_id):
+    request = drive_service.files().get_media(fileId=file_id)
+    fh = io.BytesIO()
+    downloader = MediaIoBaseDownload(fh, request)
+    done = False
+    while not done:
+        status, done = downloader.next_chunk()
+    fh.seek(0)
+    return fh
+
+def subir_o_actualizar_plantilla(archivo_bytes, nombre_usuario):
+    file_metadata = {'name': f'{nombre_usuario}.docx', 'parents': [FOLDER_ID_DRIVE]}
+    media = MediaFileUpload(archivo_bytes, mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+    existente = buscar_plantilla_en_drive(nombre_usuario)
+    if existente:
+        drive_service.files().update(fileId=existente['id'], media_body=media, supportsAllDrives=True).execute()
+    else:
+        drive_service.files().create(body=file_metadata, media_body=media, fields='id', supportsAllDrives=True).execute()
+
+# --- CONEXIÓN OPENAI ---
 try:
     api_key = st.secrets["OPENAI_API_KEY"]
 except:
     api_key = os.getenv("OPENAI_API_KEY")
-
 cliente_openai = OpenAI(api_key=api_key)
 
-# --- INYECCIÓN DE CSS (DISEÑO CORPORATIVO) ---
+# --- UTILIDADES ---
+def obtener_fecha_actual():
+    return datetime.now().strftime("%d/%m/%Y")
+
+# --- DISEÑO ---
 st.markdown("""
     <style>
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
-    html, body, [class*="css"] {
-        font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif !important;
-    }
-    .stButton>button {
-        border-radius: 4px;
-        font-weight: 500;
-        transition: all 0.2s ease-in-out;
-    }
-    .stButton>button:hover {
-        transform: translateY(-1px);
-        box-shadow: 0 4px 6px rgba(0,0,0,0.05);
-    }
-    .stTextInput>div>div>input, .stTextArea>div>div>textarea {
-        border-radius: 4px;
-    }
+    .main { background-color: #f8f9fa; }
+    .stButton>button { border-radius: 5px; height: 3em; width: 100%; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- FUNCIONES AUXILIARES ---
-def obtener_fecha_actual():
-    meses = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
-    hoy = datetime.now()
-    return f"{hoy.day} de {meses[hoy.month - 1]} del {hoy.year}"
-
+# --- ESTADO DE SESIÓN ---
 if 'usuario_actual' not in st.session_state:
     st.session_state.usuario_actual = None
+if 'texto_input' not in st.session_state:
+    st.session_state.texto_input = ""
+if 'ultimo_audio' not in st.session_state:
+    st.session_state.ultimo_audio = None
+if 'herramienta_actual' not in st.session_state:
+    st.session_state.herramienta_actual = "Propuestas"
 
 # ==========================================
-# BARRA LATERAL (SIDEBAR)
+# BARRA LATERAL
 # ==========================================
 with st.sidebar:
     st.title("ZONDA LEGAL")
-    st.markdown("---")
-    
     if st.session_state.usuario_actual is None:
-        st.subheader("Acceso al Sistema")
-        usuario_input = st.text_input("Usuario")
-        if st.button("Iniciar Sesión", use_container_width=True):
+        usuario_input = st.text_input("Ingresa tu nombre")
+        if st.button("Iniciar Sesión"):
             if usuario_input:
-                st.session_state.usuario_actual = usuario_input.lower()
+                st.session_state.usuario_actual = usuario_input.lower().strip()
                 st.rerun()
     else:
-        st.write(f"Usuario activo: **{st.session_state.usuario_actual.capitalize()}**")
-        if st.button("Cerrar Sesión", use_container_width=True):
+        user = st.session_state.usuario_actual
+        st.write(f"Hola, **{user.capitalize()}**")
+        if st.button("Cerrar Sesión"):
             st.session_state.usuario_actual = None
             st.rerun()
         
         st.markdown("---")
-        st.subheader("Configuración")
-        st.info("Cargue su plantilla base (.docx) para continuar.")
-        archivo_word = st.file_uploader("Plantilla de Propuesta", type=['docx'], label_visibility="collapsed")
-
-# ==========================================
-# PANTALLA PRINCIPAL
-# ==========================================
-if st.session_state.usuario_actual is None:
-    st.header("Bienvenido a la Plataforma de Gestión")
-    st.write("Por favor, inicie sesión en el panel lateral para acceder a las herramientas.")
-    
-elif archivo_word is None:
-    st.header("Configuración Requerida")
-    st.warning("Para habilitar la generación de documentos, cargue su modelo de Word en el panel lateral.")
-    
-else:
-    st.header("Nueva Propuesta de Registro")
-    st.write("Complete los datos básicos. La IA se encargará de redactar las clases correspondientes.")
-    
-    # FORMULARIO VISUAL
-    with st.form("formulario_propuesta"):
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            input_cliente = st.text_input("Nombre del Cliente", placeholder="Ej: Diego Maza")
-        with col2:
-            input_marca = st.text_input("Marca a Registrar", placeholder="Ej: EDESTE")
-            
-        # NUEVO CAMPO: Solo pedimos a qué se dedican, no las clases exactas
-        input_negocio = st.text_area("Descripción del Negocio / Producto", 
-                                    height=100, 
-                                    placeholder="Ej: Desarrollamos un software de gestión para estudios jurídicos y damos asesoría.")
+        st.subheader("Herramientas")
+        st.session_state.herramienta_actual = st.radio(
+            "Selecciona una opción:",
+            ["Propuestas", "Cartas Poder"]
+        )
         
         st.markdown("---")
-        st.subheader("Presupuesto")
-        
-        col3, col4 = st.columns(2)
-        with col3:
-            input_honorarios = st.number_input("Honorarios Profesionales (ARS)", min_value=0, step=1000, value=230000)
-        with col4:
-            st.number_input("Arancel INPI Fijo (ARS)", value=36000, disabled=True)
-            
-        submit_btn = st.form_submit_button("Generar Propuesta Inteligente", type="primary", use_container_width=True)
+        if st.session_state.herramienta_actual == "Propuestas":
+            info_drive = buscar_plantilla_en_drive(user)
+            if info_drive:
+                st.success("✅ Plantilla lista en Drive")
+                nuevo_archivo = st.file_uploader("Actualizar plantilla (.docx)", type=['docx'])
+                if nuevo_archivo:
+                    with open("temp_upload.docx", "wb") as f:
+                        f.write(nuevo_archivo.getbuffer())
+                    subir_o_actualizar_plantilla("temp_upload.docx", user)
+                    st.success("¡Actualizada!")
+                    st.rerun()
+            else:
+                st.warning("No tienes plantilla")
+                nuevo_archivo = st.file_uploader("Sube tu modelo (.docx)", type=['docx'])
+                if nuevo_archivo:
+                    with open("temp_upload.docx", "wb") as f:
+                        f.write(nuevo_archivo.getbuffer())
+                    subir_o_actualizar_plantilla("temp_upload.docx", user)
+                    st.success("¡Guardada en Drive!")
+                    st.rerun()
 
-    # --- LÓGICA DE GENERACIÓN ---
-    if submit_btn:
-        if input_cliente and input_marca and input_negocio:
-            
-            with st.spinner("La IA está analizando las clases de Niza correspondientes..."):
+# ==========================================
+# PANTALLA PRINCIPAL - RUTEO
+# ==========================================
+if st.session_state.usuario_actual is None:
+    st.header("Zonda Legal")
+    st.write("Inicia sesión para continuar.")
+
+# ------------------------------------------
+# HERRAMIENTA 1: PROPUESTAS
+# ------------------------------------------
+elif st.session_state.herramienta_actual == "Propuestas":
+    info_drive = buscar_plantilla_en_drive(st.session_state.usuario_actual)
+    if info_drive:
+        st.header("Generador de Propuestas")
+        col1, col2 = st.columns(2)
+        with col1:
+            input_cliente = st.text_input("Cliente")
+        with col2:
+            input_marca = st.text_input("Marca")
+
+        audio_bytes = audio_recorder(text="Hablar", icon_size="2x", pause_threshold=5.0)
+        if audio_bytes and audio_bytes != st.session_state.ultimo_audio:
+            if len(audio_bytes) > 10000:
+                with st.spinner("Escuchando..."):
+                    archivo_audio = io.BytesIO(audio_bytes)
+                    archivo_audio.name = "audio.wav"
+                    transcripcion = cliente_openai.audio.transcriptions.create(model="whisper-1", file=archivo_audio)
+                    st.session_state.texto_input = transcripcion.text
+                    st.session_state.ultimo_audio = audio_bytes
+                    st.rerun()
+
+        input_negocio_texto = st.text_area("Descripción del negocio", value=st.session_state.texto_input, key="texto_input_propuesta")
+        input_honorarios = st.number_input("Honorarios (ARS)", value=230000)
+
+        if st.button("Generar Propuesta", type="primary"):
+            if input_cliente and input_marca and st.session_state.texto_input:
+                with st.spinner("Creando documento..."):
+                    res = cliente_openai.chat.completions.create(
+                        model="gpt-4o",
+                        messages=[{"role": "system", "content": "Eres abogado de marcas. Sugiere clases de Niza en lista con guiones."},
+                                  {"role": "user", "content": st.session_state.texto_input}]
+                    )
+                    clases = res.choices[0].message.content
+                    
+                    plantilla_io = descargar_plantilla_desde_drive(info_drive['id'])
+                    doc = DocxTemplate(plantilla_io)
+                    total = input_honorarios + 36000
+                    doc.render({
+                        "FECHA": obtener_fecha_actual(), "CLIENTE": input_cliente, "MARCA": input_marca.upper(),
+                        "CLASES": clases, "HONORARIOS": f"{input_honorarios:,.0f}".replace(",", "."),
+                        "ARANCEL": "36.000", "TOTAL": f"{total:,.0f}".replace(",", ".")
+                    })
+                    final_io = io.BytesIO()
+                    doc.save(final_io)
+                    final_io.seek(0)
+                    st.session_state.word_final = final_io
+                    st.success("¡Propuesta lista!")
+
+        if 'word_final' in st.session_state:
+            st.download_button("Descargar Archivo", data=st.session_state.word_final, file_name=f"Propuesta_{input_marca}.docx")
+    else:
+        st.info("Sube una plantilla en la barra lateral para generar propuestas.")
+
+# ------------------------------------------
+# HERRAMIENTA 2: CARTAS PODER (NUEVA)
+# ------------------------------------------
+elif st.session_state.herramienta_actual == "Cartas Poder":
+    st.header("Generador Automático de Cartas Poder")
+    st.write("Dicta los datos del cliente. La IA detectará automáticamente si es persona física o sociedad.")
+    
+    # 1. ARREGLO DEL MICRÓFONO (Límite bajado a 2000 bytes)
+    audio_bytes = audio_recorder(text="Hablar", icon_size="2x", pause_threshold=5.0)
+    if audio_bytes and audio_bytes != st.session_state.ultimo_audio:
+        if len(audio_bytes) > 2000: 
+            with st.spinner("Escuchando los datos..."):
+                try:
+                    archivo_audio = io.BytesIO(audio_bytes)
+                    archivo_audio.name = "audio.wav"
+                    transcripcion = cliente_openai.audio.transcriptions.create(model="whisper-1", file=archivo_audio)
+                    st.session_state.texto_input = transcripcion.text
+                    st.session_state.ultimo_audio = audio_bytes
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error procesando el audio: {e}")
+        else:
+            st.warning("El audio fue muy corto o no se detectó sonido. Intenta de nuevo.")
+            st.session_state.ultimo_audio = audio_bytes
+
+    datos_cliente = st.text_area("Datos detectados o escríbalos aquí:", value=st.session_state.texto_input, key="texto_input_poder", height=150)
+
+    if st.button("Generar Carta Poder (PDF)", type="primary"):
+        if datos_cliente:
+            with st.spinner("Analizando tipo de persona y redactando..."):
                 
-                # 1. LLAMADA A LA IA PARA LAS CLASES
-                instruccion_sistema = """
-                Eres un abogado experto en marcas en Argentina y la Clasificación de Niza.
-                El usuario te describirá un negocio. Tu tarea es sugerir las clases pertinentes para registrar la marca.
-                Devuelve ÚNICAMENTE las clases redactadas en formato de lista con guiones, sin saludos ni introducciones.
-                Ejemplo:
-                - Clase 9: Software de gestión legal; Programas informáticos...
-                - Clase 42: Diseño y desarrollo de software...
+                # 2. INSTRUCCIÓN "ENTRENADA" PARA LA IA
+                instruccion = """
+                Eres un asistente legal experto en Argentina. Tu tarea es analizar los datos provistos y redactar SOLO la parte inicial de una carta poder.
+                DEBES APLICAR ESTAS REGLAS ESTRICTAS PARA DETECTAR EL TIPO DE PERSONA:
+                
+                - REGLA JURÍDICA: Si en el texto identificas un tipo social (SAS, S.A., S.R.L., Sociedad, Empresa, etc.), se trata de una PERSONA JURÍDICA. Debes extraer el nombre del representante legal humano, su DNI, el nombre de la sociedad, el CUIT de la sociedad y su domicilio.
+                  Ejemplo de redacción exigida: 'El Sr. [NOMBRE REPRESENTANTE], DNI N° [NUMERO], actuando en representación de la sociedad "[NOMBRE SOCIEDAD]", CUIT [NUMERO], con domicilio en [DOMICILIO]...'
+                  
+                - REGLA FÍSICA: Si solo hay nombres de personas humanas sin tipos sociales, se trata de una PERSONA FÍSICA. Extrae el nombre, DNI/CUIT y domicilio. Si hay varias, menciónalas a todas.
+                  Ejemplo de redacción exigida: 'El Sr. [NOMBRE], DNI N° [NUMERO], con domicilio real en [DOMICILIO]...'
+                
+                Devuelve la respuesta en formato JSON con esta estructura exacta:
+                {
+                  "encabezado": "El texto de presentación redactado según las reglas de arriba. Termina el texto justo antes de la palabra 'otorga/otorgan'. NO agregues el nombre de los apoderados (Valentín, Franco, etc.).",
+                  "verbo": "otorga" (si es una sola persona física o una sola sociedad) u "otorgan" (si son varias personas físicas),
+                  "firmantes": [ {"nombre": "NOMBRE DEL FIRMANTE HUMANO", "dni": "NUMERO DE DNI/CUIT"} ]
+                }
                 """
                 
                 respuesta_ia = cliente_openai.chat.completions.create(
                     model="gpt-4o",
+                    response_format={ "type": "json_object" },
                     messages=[
-                        {"role": "system", "content": instruccion_sistema},
-                        {"role": "user", "content": input_negocio}
+                        {"role": "system", "content": instruccion},
+                        {"role": "user", "content": datos_cliente}
                     ]
                 )
                 
-                clases_sugeridas = respuesta_ia.choices[0].message.content
-                
-                # 2. MATEMÁTICA Y FORMATO NUMÉRICO (Sin el símbolo de $)
-                arancel_fijo = 36000
-                monto_total = input_honorarios + arancel_fijo
-                
-                # Formateamos con puntos para los miles, pero SIN agregar el $ en Python
-                honorarios_str = f"{input_honorarios:,.0f}".replace(',', '.')
-                arancel_str = f"{arancel_fijo:,.0f}".replace(',', '.')
-                total_str = f"{monto_total:,.0f}".replace(',', '.')
-                
-                # 3. INYECCIÓN EN EL WORD
-                doc = DocxTemplate(archivo_word)
-                contexto = {
-                    "FECHA": obtener_fecha_actual(),
-                    "CLIENTE": input_cliente,
-                    "MARCA": input_marca.upper(),
-                    "CLASES": clases_sugeridas,
-                    "HONORARIOS": honorarios_str,
-                    "ARANCEL": arancel_str,
-                    "TOTAL": total_str
-                }
-                doc.render(contexto)
-                
-                buffer = io.BytesIO()
-                doc.save(buffer)
-                buffer.seek(0)
-                
-                st.session_state.word_final = buffer
-                st.success("¡Documento y clases generadas exitosamente!")
-                
-        else:
-            st.error("Error: Todos los campos son obligatorios.")
+                datos_procesados = json.loads(respuesta_ia.choices[0].message.content)
+                encabezado_cliente = datos_procesados.get("encabezado", "")
+                verbo = datos_procesados.get("verbo", "otorga")
+                firmantes = datos_procesados.get("firmantes", [])
 
-    if 'word_final' in st.session_state:
+                # --- TEXTOS ESTÁTICOS ---
+                texto_apoderados = f" por la presente {verbo} a favor del Sr. Valentín Nehuen Páez, DNI N° 42.749.912, con domicilio en calle Las Malvinas 2621, San Rafael, Mendoza, al Sr. Franco Sileoni D´Angelo, DNI N° 42.266.242, con domicilio en calle Barrio puesta del sol, casa 5, Chacras de coria, Mendoza y al Sr. Hugo Matías Bindelli, DNI N° 43.369.631 con domicilio en calle Julio A. Roca 316, Ciudad de Mendoza, Provincia de Mendoza poder amplio para "
+                texto_cuerpo = "que en su nombre y representación inicie, entienda e intervenga hasta su total terminación en los procesos administrativos frente al Instituto Nacional de la Propiedad Industrial y la Dirección Nacional de Derechos de Autor, necesarios para la obtención de patentes de invención, modelos de utilidad, marcas, modelos y diseños industriales, derechos de autor y conexos; la renovación de todos ellos, pudiendo presentarse ante las autoridades que corresponda, ya sean nacionales, provinciales o municipales, con intervenciones, solicitudes, declaraciones, descripciones, apelaciones y otros recursos; formular, limitar, modificar y retirar oposiciones, reclamos y llamados de atención; justificar explotaciones y usos; efectuar modificaciones; solicitar testimonios; pedir plazos; retirar, inspeccionar, presentar y recibir documentos; desistir y hacer cuanto fuere menester ante las autoridades administrativas de cualquier orden. Al efecto, lo faculta para que se presente ante las autoridades o terceros particulares que corresponda, con escritos, documentos y cuantos justificativos creyera necesario, ya sea en soporte papel o mediante la utilización de presentaciones electrónicas, para hacer valer sus derechos de propiedad intelectual y asociados; como así también a constituir domicilio electrónico y recibir las notificaciones que a su nombre allí se diligencien, y toda cuanta otra facultad más le fuera necesaria, para mejor desempeño de este mandato y hasta su completa terminación."
+
+                # --- GENERACIÓN DEL PDF ---
+                pdf = FPDF()
+                pdf.add_page()
+                pdf.set_font("Arial", 'B', 14)
+                pdf.cell(0, 10, "CARTA PODER", ln=True, align='C')
+                pdf.ln(10)
+                
+                pdf.set_font("Arial", '', 11)
+                texto_completo = f"{encabezado_cliente}{texto_apoderados}{texto_cuerpo}"
+                
+                # FPDF requiere que decodifiquemos a latin-1 para evitar errores con tildes
+                pdf.multi_cell(0, 7, texto_completo.encode('latin-1', 'replace').decode('latin-1'))
+                
+                pdf.ln(15)
+                fecha_str = f"Fecha: {obtener_fecha_actual()}"
+                pdf.cell(0, 7, fecha_str, ln=True)
+                
+                pdf.ln(20)
+                for firmante in firmantes:
+                    pdf.cell(0, 7, f"Aclaración: {firmante.get('nombre', '')}", ln=True)
+                    pdf.cell(0, 7, f"DNI/CUIT: {firmante.get('dni', '')}", ln=True)
+                    pdf.cell(0, 7, "Firma: ________________________", ln=True)
+                    pdf.ln(15)
+
+                # 3. ARREGLO DEL ERROR DE BYTEARRAY
+                # Extraemos los bytes directamente sin usar .encode()
+                pdf_bytes = bytes(pdf.output()) 
+                
+                st.session_state.pdf_final = pdf_bytes
+                st.success("¡Carta Poder PDF generada con éxito!")
+
+    if 'pdf_final' in st.session_state and st.session_state.herramienta_actual == "Cartas Poder":
         st.download_button(
-            label="Descargar Propuesta",
-            data=st.session_state.word_final,
-            file_name=f"Propuesta_{input_cliente.replace(' ', '_')}.docx" if 'input_cliente' in locals() and input_cliente else "Propuesta.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            label="Descargar Carta Poder (PDF)",
+            data=st.session_state.pdf_final,
+            file_name="Carta_Poder.pdf",
+            mime="application/pdf"
         )
