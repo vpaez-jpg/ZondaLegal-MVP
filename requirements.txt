@@ -1,7 +1,0 @@
-streamlit
-docxtpl
-openai
-audio_recorder_streamlit
-python-dotenv
-google-api-python-client
-google-auth
